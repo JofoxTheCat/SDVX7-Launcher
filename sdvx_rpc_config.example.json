@@ -1,0 +1,12 @@
+{
+  "asphyxia_exe": "D:\\Asphyxia\\asphyxia-core-x64.exe",
+  "asphyxia_url": "http://localhost:8083/",
+  "player_name": "",
+  "jacket_mode": "S",
+  "jacket_url": "https://jackets.ryu7w7.xyz/sdvx",
+  "spice_api_port": 1337,
+  "heartbeat_min": 2.0,
+  "heartbeat_max": 15.0,
+  "show_vf": true,
+  "show_diff": true
+}

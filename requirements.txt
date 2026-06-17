@@ -1,0 +1,7 @@
+# Runtime dependency
+pypresence
+
+# Optional, for building the recommended standalone Windows .exe (auto-elevates
+# via UAC thanks to --uac-admin):
+#   pip install pyinstaller
+#   python -m PyInstaller --onefile --uac-admin --name "SDVX7_LauncherV1-00" --icon=sdvxrpc.ico sdvx_rpc.py
