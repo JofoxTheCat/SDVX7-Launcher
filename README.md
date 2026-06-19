@@ -1,4 +1,4 @@
-# SDVX Discord Rich Presence
+# SDVX ∇ Launcher | Discord Rich Presence
 
 A launcher for **SOUND VOLTEX** (running on **spice2x** with an **Asphyxia CORE**
 EA service) that shows a live, detailed **Discord Rich Presence**:
