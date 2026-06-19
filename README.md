@@ -141,6 +141,10 @@ in `name_offsets`.
 | `asphyxia_savedata` | Explicit path to the SDVX savedata `.db` (else auto-located) |
 | `vf_clear_coeff` | Optional override of the clear-type VolForce coefficients |
 | `launch_prefix` | **Linux only** — launch wrapper, e.g. `["wine"]` or a Proton command |
+| `wine_prefix` | **Linux only** — `WINEPREFIX` path used for the game + Asphyxia |
+| `music_db_path` | Explicit path to the `music_db*.xml` (else auto-located, incl. a recursive scan) |
+| `ryunet_cid` | NFC card id for custom Ryunet servers — VolForce is then fetched from the Ryunet API instead of local savedata |
+| `pcbid_by_url` | `{ "<custom_ea_url>": "<pcbid>" }` — PCBID per custom server (asked once, passed to spice2x via `-p`) |
 
 ---
 
@@ -159,6 +163,27 @@ in `name_offsets`.
 
 ---
 
+## Updates
+
+On startup the launcher checks GitHub for a newer release (compares the local
+version to the latest tag) and, if one exists, prints the download link and
+offers to open it. The check has a short timeout and is skipped silently if you
+are offline, so it never blocks the launch.
+
+## Known difficulty offsets
+
+The difficulty byte offset in `soundvoltex.dll` is game-version-specific. If your
+version is listed here you can set `spice_diff_offset` directly instead of
+running `--find-diff`:
+
+| Game version | `spice_diff_offset` |
+|--------------|---------------------|
+| KFC-2026012700 | `0x11DDE18` |
+| KFC-2026032402 | `0x11FFBF8` |
+
+(Contributions welcome — if you locate the offset for another version with
+`--find-diff`, please open an issue/PR so others can reuse it.)
+
 ## Troubleshooting
 
 - **Name shows `GUEST` or VolForce is missing** — you are not carded-in yet;
@@ -172,7 +197,7 @@ in `name_offsets`.
 - **Memory read failed** — Windows: run as Administrator. Linux: ptrace is
   restricted (see *Prerequisites*).
 - **Discord not updating** — make sure the Discord desktop app is running and
-  logged in before launching.
+  logged in before launching. The Script also stops working if you're are selecting something in the command window.
 
 ---
 
@@ -203,10 +228,6 @@ owners. This is an unofficial, non-commercial fan tool.
 
 ## Future features
 
-- **Ryu7w7 / Ryunet network support** — surface network features such as
-  rivals, events and extended profile data when connected to the Ryu7w7
-  network. *(In planning — pending details on the server structure, available
-  endpoints and authentication.)*
 - **Confirmed Linux support** — full memory backend for the game under
   Wine/Proton is implemented and is currently being verified on real hardware;
   once confirmed it will be promoted from experimental to officially supported.

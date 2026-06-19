@@ -32,6 +32,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import ctypes
 import ctypes.wintypes
 
@@ -43,6 +46,8 @@ from pypresence import Presence
 
 CLIENT_ID               = "896595145959551036"
 GAME_EXECUTABLE         = "spice64.exe"
+__version__             = "1.0.0"                       # bump per release/tag
+GITHUB_REPO             = "JofoxTheCat/SDVX7-Launcher"
 IMG_MENU                = "sdvx_nabla"
 CONFIG_FILE             = "sdvx_rpc_config.json"
 JACKET_STANDARD         = "https://jackets.ryu7w7.xyz/sdvx"
@@ -522,8 +527,12 @@ def _start_server(exe_path: str, wait_sec: int = 3) -> "subprocess.Popen | None"
         # shutdown still works (terminate() uses TerminateProcess, not signals).
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         cmd = [exe_path]
+        env = None
         if _IS_LINUX and exe_path.lower().endswith(".exe"):
             cmd = ["wine"] + cmd          # Windows Asphyxia build under Wine
+            wp = _load_config().get("wine_prefix")
+            if wp:
+                env = {**os.environ, "WINEPREFIX": os.path.expanduser(wp)}
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -531,6 +540,7 @@ def _start_server(exe_path: str, wait_sec: int = 3) -> "subprocess.Popen | None"
             cwd=os.path.dirname(exe_path) or None,
             creationflags=flags,
             start_new_session=_IS_LINUX,  # POSIX: own session → isolated from SIGINT
+            env=env,
         )
         print(f"[INFO] Server started (PID {proc.pid}): "
               f"{os.path.basename(exe_path)}")
@@ -574,14 +584,18 @@ def run_setup_wizard() -> tuple[str, str, str, str, int, bool]:
         return _DEBUG
 
     # ── Quick-start: if the config is complete, offer to start immediately ───
-    required = ("asphyxia_exe", "asphyxia_url", "jacket_mode", "jacket_url",
-                "spice_api_port", "player_name")
+    # player_name is OPTIONAL now (auto-detected), and jacket_url only matters
+    # for the online/local jacket modes – so don't gate the quick-start on them.
+    required = ["asphyxia_url", "jacket_mode", "spice_api_port"]
+    if cfg.get("jacket_mode") in ("O", "L"):
+        required.append("jacket_url")
     if all(cfg.get(k) not in (None, "") for k in required):
         hb_min = cfg.get("heartbeat_min", 2.0)
         hb_max = cfg.get("heartbeat_max", 15.0)
         print(SEP)
         print(f"  {B}SDVX Rich Presence{R}  {DIM}— saved config found{R}")
-        print(f"    {GR}✓{R} {cfg['player_name']}  ·  port {cfg['spice_api_port']}"
+        who = cfg.get("player_name") or "auto-detect"
+        print(f"    {GR}✓{R} {who}  ·  port {cfg['spice_api_port']}"
               f"  ·  heartbeat {hb_min:g}-{hb_max:g}s")
         print(f"\n    {CY}[Enter]{R} Start now with saved settings")
         print(f"    {CY}[D]{R}     Start now with debug output on")
@@ -680,7 +694,32 @@ def run_setup_wizard() -> tuple[str, str, str, str, int, bool]:
             hint_c  = f" {DIM}[{saved_c}]{R}" if saved_c else ""
             raw_c   = input(f"    Custom EA URL{hint_c}: ").strip().rstrip("/")
             ea_url  = (raw_c if raw_c else saved_c).rstrip("/") + "/"
-            _update_config(custom_ea_url=ea_url)
+            # Custom servers require a PCBID, passed to spice2x via -p. Remember
+            # it per server URL so it is only asked the first time.
+            pcbid_map   = dict(cfg.get("pcbid_by_url", {}))
+            saved_pcbid = pcbid_map.get(ea_url, "")
+            hint_p = f" {DIM}[{saved_pcbid}]{R}" if saved_pcbid else ""
+            raw_p  = input(f"    PCBID for this server "
+                           f"{DIM}(spice2x -p){R}{hint_p}: ").strip()
+            pcbid  = raw_p if raw_p else saved_pcbid
+            if pcbid:
+                pcbid_map[ea_url] = pcbid
+                print(f"  {DIM}  ↳ PCBID stored for {ea_url}{R}")
+            else:
+                print(f"  {YL}  ↳ No PCBID set – a custom server will likely "
+                      f"reject the connection.{R}")
+            # Ryunet card id (NFC cid) for this server → VolForce via the API.
+            cid_map     = dict(cfg.get("ryunet_cid_by_url", {}))
+            saved_cid   = cid_map.get(ea_url, "") or cfg.get("ryunet_cid", "")
+            hint_cid    = f" {DIM}[{saved_cid}]{R}" if saved_cid else ""
+            raw_cid     = input(f"    Ryunet card id "
+                                f"{DIM}(NFC cid, for VolForce){R}{hint_cid}: ").strip()
+            cid_val     = raw_cid if raw_cid else saved_cid
+            if cid_val:
+                cid_map[ea_url] = cid_val
+                print(f"  {DIM}  ↳ Ryunet card id stored for {ea_url}{R}")
+            _update_config(custom_ea_url=ea_url, pcbid_by_url=pcbid_map,
+                           ryunet_cid_by_url=cid_map)
             break
         elif srv in ("K", "N"):
             ea_url = ""; break
@@ -825,7 +864,13 @@ def _fmt_level(raw: str) -> str:
     return f"{v:.1f}".rstrip("0").rstrip(".") if v != int(v) else str(int(v))
 
 
-def load_song_map() -> tuple[dict, dict]:
+def _find_music_db() -> str | None:
+    """Locate the music_db XML across Windows/Linux layouts.
+    Order: explicit config path → known relative paths → shallow recursive scan
+    (handles the Asphyxia/omnimix layout differences under Wine on Linux)."""
+    cfg_path = _load_config().get("music_db_path")
+    if cfg_path and os.path.exists(cfg_path):
+        return cfg_path
     search_paths = [
         "data_mods/omnimix/others/music_db.merged.xml",
         "../data_mods/omnimix/others/music_db.merged.xml",
@@ -836,7 +881,29 @@ def load_song_map() -> tuple[dict, dict]:
         "others/music_db.xml",
         "music_db.xml",
     ]
-    xml_path = next((p for p in search_paths if os.path.exists(p)), None)
+    hit = next((p for p in search_paths if os.path.exists(p)), None)
+    if hit:
+        return hit
+    # Recursive fallback (depth-limited) from CWD and parent. Prefer .merged.xml.
+    best = None
+    for root in (".", ".."):
+        base_depth = os.path.abspath(root).count(os.sep)
+        for dirpath, dirs, files in os.walk(root):
+            if os.path.abspath(dirpath).count(os.sep) - base_depth > 4:
+                dirs[:] = []
+                continue
+            for fn in files:
+                low = fn.lower()
+                if low.startswith("music_db") and low.endswith(".xml"):
+                    p = os.path.join(dirpath, fn)
+                    if "merged" in low:
+                        return p
+                    best = best or p
+    return best
+
+
+def load_song_map() -> tuple[dict, dict]:
+    xml_path = _find_music_db()
     if not xml_path:
         return {}, {}
 
@@ -934,7 +1001,7 @@ def print_logo() -> None:
     print(f"{P}  / _ \\(_)__ _______  _______/ / / _ \\/ _ \\/ ___/ {R}")
     print(f"{P} / // / (_-</ __/ _ \\/ __/ _  / / , _/ ___/ /__   {R}")
     print(f"{P}/____/_/___/\\__/\\___/_/  \\_,_/ /_/|_/_/   \\___/   {R}")
-    print(f"\n              {P}[ Active – v1.0.0 ]{R}\n")
+    print(f"\n              {P}[ Active ]{R}\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1505,13 +1572,13 @@ def _find_value_mode(target: str | None = None, pid: int | None = None) -> None:
             # ── two readings while the value is held → stability reference ──
             snapA = _read_full_module(pid, base, size)
             if not snapA:
-                print("    ↳ read failed – running as Administrator?")
+                print("    ↳ memory read failed (Windows: run as admin; Linux: ptrace permission).")
                 rounds -= 1; continue
-            print("    holding… (keep your hands off the controls)")
+            print("    capturing baseline… (do not change the difficulty yet)")
             time.sleep(1.5)
             snapB = _read_full_module(pid, base, size)
             if not snapB:
-                print("    ↳ read failed – running as Administrator?")
+                print("    ↳ memory read failed (Windows: run as admin; Linux: ptrace permission).")
                 rounds -= 1; continue
             base_id = ident(lbl)
             phase   = "tracking"
@@ -1522,7 +1589,7 @@ def _find_value_mode(target: str | None = None, pid: int | None = None) -> None:
         # ── tracking: every later round ──────────────────────────────────────
         buf = _read_full_module(pid, base, size)
         if not buf:
-            print("    ↳ read failed – running as Administrator?")
+            print("    ↳ memory read failed (Windows: run as admin; Linux: ptrace permission).")
             rounds -= 1; continue
         this_id = ident(lbl)
 
@@ -1563,11 +1630,10 @@ def _find_value_mode(target: str | None = None, pid: int | None = None) -> None:
                 print(f"      0x{i:X}   map={cands[i]}")
         if n == 0:
             print(f"\n[RESULT] No byte in {SPICE_DLL} tracks the {word} as a")
-            print( "         stable small value.  Most likely it lives behind a")
-            print( "         pointer / on the heap, OR it isn't written on this")
-            print( "         screen.  A Cheat Engine pointer-scan is the next step")
-            print( "         (see the chat for a recipe). Once you have the chain")
-            print( "         I can wire a pointer-reader into the launcher.")
+            print( "         stable small value on this screen. It may live behind")
+            print( "         a pointer / on the heap. Re-run --find-diff and switch")
+            print( "         between more distinct difficulties, or set")
+            print( "         \"spice_diff_offset\" manually in the config if known.")
             return
 
     if not cands:
@@ -1581,13 +1647,20 @@ def _find_value_mode(target: str | None = None, pid: int | None = None) -> None:
         print(f"\n[INFO] {len(cands)} candidates remain; using 0x{off:X}. "
               "Re-run with more distinct values to disambiguate.")
 
-    # learned maps byte_value → slot (int). Persist for the live reader.
+    # learned maps byte_value → slot (int). Persist only when it's NOT the
+    # trivial identity map (0→0,1→1,…), which the live reader assumes by default.
     value_to_slot = {str(v): k for k, v in learned.items()}
-    _update_config(spice_diff_offset=off, spice_diff_map=value_to_slot)
-    print(f"\n[RESULT] Difficulty offset = 0x{off:X}  → saved "
-          f"(spice_diff_offset).")
-    print(f"         Learned byte→slot encoding: {value_to_slot} "
-          f"(spice_diff_map).")
+    is_identity = all(int(k) == v for k, v in value_to_slot.items())
+    if is_identity:
+        _update_config(spice_diff_offset=off)
+        print(f"\n[RESULT] Difficulty offset = 0x{off:X}  → saved "
+              f"(spice_diff_offset).")
+    else:
+        _update_config(spice_diff_offset=off, spice_diff_map=value_to_slot)
+        print(f"\n[RESULT] Difficulty offset = 0x{off:X}  → saved "
+              f"(spice_diff_offset).")
+        print(f"         Learned byte→slot encoding: {value_to_slot} "
+              f"(spice_diff_map).")
     print("         Restart the launcher – diff is now read live.")
 
 
@@ -1895,6 +1968,113 @@ def _format_vf(vf) -> str:
     return f"{vf:.3f}" if isinstance(vf, (int, float)) else ""
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# RYUNET (Ryu7w7 network) – rich-presence lookup by card id
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoint (provided by the Ryunet developer):
+#   GET https://x.ryu7w7.xyz/api/rp/lookup?cid=<card_id>
+# Same idea as the Asphyxia path: resolve the active account, then pull its
+# rich-presence data (name, and possibly VolForce / live status) for that id –
+# only the *source* differs (a network API instead of the local savedata).
+# The exact response shape + auth are confirmed via --ryunet-test before this is
+# wired into the live loop.
+
+RYUNET_API_DEFAULT = "https://x.ryu7w7.xyz/api/rp/lookup"
+# The endpoint serves JSON to browser-like clients but 404s unknown user agents
+# (edge/anti-bot filtering), so we present standard browser headers.
+_RYUNET_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+_RYUNET_NAME_KEYS  = ("name", "dname", "player", "playername", "pname", "djname")
+_RYUNET_VF_KEYS    = ("vf", "volforce", "volforce_value", "vforce", "force")
+
+
+def _ryunet_lookup(cid: str, base_url: str = RYUNET_API_DEFAULT,
+                   timeout: float = 4.0, headers: dict | None = None):
+    """GET the Ryunet RP lookup for a card id.
+
+    Returns (status, payload): payload is the parsed JSON (dict/list) when the
+    body is JSON, otherwise the raw text. status is the HTTP code, or None on a
+    network/transport error (payload then holds the error string). HTTPError
+    bodies (4xx/5xx) are returned too, so error messages stay visible.
+    """
+    url = f"{base_url}?{urllib.parse.urlencode({'cid': cid})}"
+    req = urllib.request.Request(url, headers=headers or _RYUNET_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status, body = r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:                       # URLError, timeout, DNS, …
+        return None, f"{type(e).__name__}: {e}"
+    try:
+        return status, json.loads(body)
+    except ValueError:
+        return status, body
+
+
+def _ryunet_extract(payload):
+    """Best-effort (name, vf) extraction from a Ryunet JSON payload, tolerating
+    a wrapper object ({"data": {...}} etc.). Tuned once the real shape is known."""
+    if not isinstance(payload, dict):
+        return None, None
+    flat = dict(payload)
+    for wrap in ("data", "profile", "result", "rp", "player"):
+        if isinstance(payload.get(wrap), dict):
+            flat.update(payload[wrap])
+    name = next((flat[k] for k in _RYUNET_NAME_KEYS if flat.get(k)), None)
+    vf   = next((flat[k] for k in _RYUNET_VF_KEYS if k in flat), None)
+    return name, vf
+
+
+def _ryunet_vf_string(cid: str):
+    """Fetch + format the VolForce for a card id via the Ryunet API.
+    Returns a string like '5.572' or None on any failure. The API ships VF
+    scaled ×1000 (e.g. 5572 = 5.572)."""
+    status, payload = _ryunet_lookup(cid)
+    if status == 200:
+        _, vf = _ryunet_extract(payload)
+        if isinstance(vf, (int, float)):
+            return _format_vf(vf / 1000.0 if vf > 50 else float(vf))
+    return None
+
+
+def _ryunet_test_mode() -> None:
+    """python sdvx_rpc.py --ryunet-test --cid <card_id>
+
+    Probe the Ryunet endpoint and print the raw + parsed response so we can
+    confirm the contract (field names, auth, live status) from your machine,
+    where a valid Ryunet card id is available."""
+    cfg  = _load_config()
+    base = cfg.get("ryunet_api", RYUNET_API_DEFAULT)
+    cid  = ""
+    if "--cid" in sys.argv:
+        i = sys.argv.index("--cid")
+        if i + 1 < len(sys.argv):
+            cid = sys.argv[i + 1]
+    cid = cid or cfg.get("ryunet_cid", "")
+    if not cid:
+        print("[ERROR] No card id. Usage: python sdvx_rpc.py --ryunet-test "
+              "--cid <card_id>   (or set \"ryunet_cid\" in the config).")
+        return
+    print(f"[RYUNET] GET {base}?cid={cid}")
+    status, payload = _ryunet_lookup(cid, base)
+    print(f"[RYUNET] HTTP status: {status}")
+    if isinstance(payload, (dict, list)):
+        print(json.dumps(payload, indent=2, ensure_ascii=False)[:4000])
+        nm, vf = _ryunet_extract(payload)
+        print(f"\n[RYUNET] guessed → name={nm!r}  vf={vf!r}")
+        if nm is None:
+            print("[RYUNET] (name field not auto-detected – send me the JSON "
+                  "above so I can map the right field.)")
+    else:
+        print("[RYUNET] body (not JSON):")
+        print(str(payload)[:4000])
+
+
 def _vf_test_mode() -> None:
     """python sdvx_rpc.py --vf-test  → verify VolForce + dump sample records."""
     cfg = _load_config()
@@ -1984,6 +2164,53 @@ def _find_name_mode() -> None:
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UPDATE CHECK (GitHub) – offline-safe, never blocks the launch
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_ver(s: str) -> tuple:
+    s = s.strip().lstrip("vV")
+    return tuple(int(p) for p in re.split(r"[.\-_]", s) if p.isdigit())
+
+
+def _check_for_update(timeout: float = 3.0) -> None:
+    """Compare the local __version__ with the latest GitHub release tag. Prints a
+    notice and offers to open the download page if newer. Any failure (no
+    internet, rate limit, no release) is swallowed so the launcher still runs."""
+    api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(api, headers={
+        "User-Agent": "sdvx-rpc-update-check",
+        "Accept": "application/vnd.github+json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return                                   # offline / rate-limited → skip
+    tag = data.get("tag_name") or ""
+    url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases"
+    if not tag:
+        return
+    try:
+        newer = _parse_ver(tag) > _parse_ver(__version__)
+    except Exception:
+        newer = tag.lstrip("vV") != __version__
+    if not newer:
+        return
+    print(f"\n[UPDATE] New version available: {tag}  (you have v{__version__})")
+    print(f"[UPDATE] {url}")
+    try:
+        ans = input("[UPDATE] Open the download page now? (Y/N) [N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if ans == "y":
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            print(f"[UPDATE] Open manually: {url}")
+
+
 def main() -> None:
     if "--spice-dump" in sys.argv:
         _spice_dump_mode()
@@ -1997,8 +2224,12 @@ def main() -> None:
     if "--find-name" in sys.argv:
         _find_name_mode()
         return
+    if "--ryunet-test" in sys.argv:
+        _ryunet_test_mode()
+        return
 
     print_logo()
+    _check_for_update()
 
     fallback_name, jacket_base_url, ea_url, server_exe, spice_port, _ = \
         run_setup_wizard()
@@ -2048,6 +2279,13 @@ def main() -> None:
         game_args += ["-url", ea_url]   # Correct Spice2x flag (not -ea)
         print(f"[INFO] Passing EA URL to game: {ea_url}")
 
+    # Custom servers need a PCBID (spice2x -p). It's matched to the server URL
+    # and stored in the config (asked once in the wizard's Custom-URL step).
+    _pcbid = _load_config().get("pcbid_by_url", {}).get(ea_url)
+    if _pcbid:
+        game_args += ["-p", _pcbid]
+        print(f"[INFO] Passing PCBID to game (-p {_pcbid}).")
+
     # ── SpiceAPI: fresh session password, enable API + memory access ──────────
     # The password is generated per session and never written to disk; the
     # memory module only works when a password is set.
@@ -2057,11 +2295,18 @@ def main() -> None:
           f"(session password generated).")
 
     # On Linux the game is a Windows binary → run it through Wine/Proton.
-    # Configurable via "launch_prefix" (e.g. ["wine"] or a Proton wrapper).
+    # Configurable via "launch_prefix" (e.g. ["wine"] or a Proton wrapper) and
+    # "wine_prefix" (WINEPREFIX path, e.g. "/home/user/.wine_sdvx").
+    _game_env = None
     if _IS_LINUX:
-        prefix = _load_config().get("launch_prefix") or ["wine"]
+        _cfg = _load_config()
+        prefix = _cfg.get("launch_prefix") or ["wine"]
         game_args = list(prefix) + game_args
         print(f"[INFO] Linux: launching via {' '.join(prefix)}.")
+        wp = _cfg.get("wine_prefix")
+        if wp:
+            _game_env = {**os.environ, "WINEPREFIX": os.path.expanduser(wp)}
+            print(f"[INFO] Using WINEPREFIX={wp}")
 
     try:
         process = subprocess.Popen(
@@ -2069,6 +2314,7 @@ def main() -> None:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE,  bufsize=1,
             universal_newlines=True, encoding="cp932", errors="replace",
+            env=_game_env,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to launch {GAME_EXECUTABLE}: {exc}")
@@ -2178,6 +2424,9 @@ def main() -> None:
     _vf_clear_map = {int(k): v for k, v in
                      _vf_cfg.get("vf_clear_coeff", {}).items()} or _VF_CLEAR
     active_refid  = None
+    _ryunet_cid   = (_vf_cfg.get("ryunet_cid_by_url", {}).get(ea_url)
+                     or _vf_cfg.get("ryunet_cid"))     # custom-server VF source
+    _last_ryunet  = 0.0
     # per-account name offsets ({name: offset}); migrate any single offset
     name_offsets  = {str(k): int(v) for k, v in
                      _vf_cfg.get("name_offsets", {}).items()}
@@ -2186,10 +2435,11 @@ def main() -> None:
         name_offsets[_vf_cfg["player_name"]] = int(_vf_cfg["player_name_offset"])
 
     def _refresh_account() -> None:
-        """Resolve the carded-in account (separate name offset per account,
-        auto-discovered from the Asphyxia profile names) and update the display
-        name + VolForce. Only meaningful once logged in (My Room reached)."""
-        nonlocal current_vf, player_name, active_refid
+        """Resolve the carded-in account and update the display name + VolForce.
+        Name is read live from memory. VolForce comes from the Asphyxia savedata,
+        or — if a Ryunet card id is configured (custom server) — from the Ryunet
+        API. Only meaningful once logged in (My Room reached)."""
+        nonlocal current_vf, player_name, active_refid, _last_ryunet
         if not logged_in:
             player_name  = "GUEST"
             current_vf   = ""
@@ -2207,7 +2457,15 @@ def main() -> None:
             n2, r2 = _active_profile(_vf_path)
             if n2:
                 player_name, active_refid = n2, r2
-        if _vf_path and active_refid:
+
+        if _ryunet_cid:                            # custom server → VF from API
+            now = time.time()
+            if now - _last_ryunet >= 60.0 or not current_vf:
+                _last_ryunet = now
+                vf = _ryunet_vf_string(_ryunet_cid)
+                if vf is not None:
+                    current_vf = vf
+        elif _vf_path and active_refid:            # local Asphyxia savedata
             try:
                 vf = compute_volforce(_vf_path, diff_map, _vf_clear_map,
                                       refid=active_refid)
@@ -2217,13 +2475,15 @@ def main() -> None:
 
     _refresh_vf = _refresh_account   # keep the existing call-site name working
 
-    if _vf_path:
+    if _ryunet_cid:
+        print(f"[INFO] VolForce from Ryunet API (cid {_ryunet_cid}); "
+              f"name appears once you're carded-in (My Room).")
+    elif _vf_path:
         print(f"[INFO] VolForce ready (from {os.path.basename(_vf_path)}); "
               f"name + VF appear once you're carded-in (My Room).")
     else:
-        print("[INFO] VolForce disabled – savedata not found. "
-              "Name is read live from memory once carded-in; set "
-              "\"asphyxia_savedata\" for VF.")
+        print("[INFO] VolForce disabled – no savedata and no Ryunet card id. "
+              "Name is read live from memory once carded-in.")
 
     def build_package() -> dict | None:
         """The COMPLETE Discord package for the current state. Pure snapshot,
