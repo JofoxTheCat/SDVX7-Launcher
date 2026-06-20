@@ -179,7 +179,8 @@ running `--find-diff`:
 
 | Game version | `spice_diff_offset` |
 |--------------|---------------------|
-| NABLA (∇) | `0x11DDE18` |
+| KFC-2026012700 | `0x11DDE18` |
+| KFC-2026032402 | `0x11FFBF8` |
 
 (Contributions welcome — if you locate the offset for another version with
 `--find-diff`, please open an issue/PR so others can reuse it.)
