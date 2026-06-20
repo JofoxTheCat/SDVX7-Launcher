@@ -46,7 +46,7 @@ from pypresence import Presence
 
 CLIENT_ID               = "896595145959551036"
 GAME_EXECUTABLE         = "spice64.exe"
-__version__             = "1.0.0"                       # bump per release/tag
+__version__             = "1.1.1"                       # bump per release/tag
 GITHUB_REPO             = "JofoxTheCat/SDVX7-Launcher"
 IMG_MENU                = "sdvx_nabla"
 CONFIG_FILE             = "sdvx_rpc_config.json"
@@ -165,25 +165,36 @@ def _linux_find_pid(exe_name: str) -> int | None:
 
 def _linux_find_game_pid() -> int | None:
     """Under Wine the real game runs as its OWN process (not the `wine` wrapper
-    we spawned). Find the pid whose name is spice64.exe – preferring the one
-    that already has soundvoltex.dll mapped (definitely the game)."""
+    we spawned, and the wrapper may be named soda/wine64/preloader). The reliable
+    signal is the process that has soundvoltex.dll mapped; fall back to a
+    spice64.exe comm/cmdline match."""
     fallback = None
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
+        # definitive: the process that mapped the game module
         try:
-            comm = open(f"/proc/{entry}/comm").read().strip().lower()
-        except OSError:
-            continue
-        if comm != GAME_EXECUTABLE.lower():
-            continue
-        try:
-            if "soundvoltex.dll" in open(f"/proc/{entry}/maps",
-                                         errors="replace").read().lower():
-                return int(entry)          # the game, module already loaded
+            with open(f"/proc/{entry}/maps", errors="replace") as fh:
+                if "soundvoltex.dll" in fh.read().lower():
+                    return int(entry)
         except OSError:
             pass
-        fallback = int(entry)              # PE process, dll maybe not loaded yet
+        # hint: name/cmdline mentions spice64.exe
+        if fallback is None:
+            try:
+                comm = open(f"/proc/{entry}/comm").read().strip().lower()
+            except OSError:
+                comm = ""
+            if comm == GAME_EXECUTABLE.lower():
+                fallback = int(entry)
+            else:
+                try:
+                    with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                        if GAME_EXECUTABLE.lower() in fh.read().decode(
+                                "utf-8", "replace").lower():
+                            fallback = int(entry)
+                except OSError:
+                    pass
     return fallback
 
 
@@ -865,41 +876,55 @@ def _fmt_level(raw: str) -> str:
 
 
 def _find_music_db() -> str | None:
-    """Locate the music_db XML across Windows/Linux layouts.
-    Order: explicit config path → known relative paths → shallow recursive scan
-    (handles the Asphyxia/omnimix layout differences under Wine on Linux)."""
-    cfg_path = _load_config().get("music_db_path")
+    """Locate the music_db XML across Windows/Linux layouts. Collects every
+    candidate (known relative paths + a depth-limited recursive scan) and picks
+    the LARGEST one, since partial/test dbs (e.g. 44 songs) are tiny compared to
+    the full db (~2000+ songs). An explicit config path always wins."""
+    cfg = _load_config()
+    cfg_path = cfg.get("music_db_path")
     if cfg_path and os.path.exists(cfg_path):
         return cfg_path
-    search_paths = [
+
+    candidates: set[str] = set()
+    rels = [
         "data_mods/omnimix/others/music_db.merged.xml",
-        "../data_mods/omnimix/others/music_db.merged.xml",
-        "omnimix/others/music_db.merged.xml",
-        "music_db.merged.xml",
+        "data_mods/omnimix/others/music_db.xml",
         "data/others/music_db.xml",
-        "../data/others/music_db.xml",
         "others/music_db.xml",
+        "music_db.merged.xml",
         "music_db.xml",
     ]
-    hit = next((p for p in search_paths if os.path.exists(p)), None)
-    if hit:
-        return hit
-    # Recursive fallback (depth-limited) from CWD and parent. Prefer .merged.xml.
-    best = None
-    for root in (".", ".."):
+    # anchor roots: CWD, parent, and the configured game folder (if any)
+    roots = [".", ".."]
+    gexe = cfg.get("game_exe_path")
+    game_dir = os.path.dirname(gexe) if gexe else ""
+    if game_dir:
+        roots.append(game_dir)
+        for rel in rels:
+            p = os.path.join(game_dir, rel)
+            if os.path.exists(p):
+                candidates.add(os.path.abspath(p))
+    for rel in rels:
+        if os.path.exists(rel):
+            candidates.add(os.path.abspath(rel))
+
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
         base_depth = os.path.abspath(root).count(os.sep)
         for dirpath, dirs, files in os.walk(root):
-            if os.path.abspath(dirpath).count(os.sep) - base_depth > 4:
+            if os.path.abspath(dirpath).count(os.sep) - base_depth > 6:
                 dirs[:] = []
                 continue
             for fn in files:
                 low = fn.lower()
                 if low.startswith("music_db") and low.endswith(".xml"):
-                    p = os.path.join(dirpath, fn)
-                    if "merged" in low:
-                        return p
-                    best = best or p
-    return best
+                    candidates.add(os.path.abspath(os.path.join(dirpath, fn)))
+
+    if not candidates:
+        return None
+    # largest file = most complete db (partial/omnimix dbs are much smaller)
+    return max(candidates, key=lambda p: (os.path.getsize(p) if os.path.exists(p) else 0))
 
 
 def load_song_map() -> tuple[dict, dict]:
@@ -2234,12 +2259,16 @@ def main() -> None:
     fallback_name, jacket_base_url, ea_url, server_exe, spice_port, _ = \
         run_setup_wizard()
 
-    if not os.path.exists(GAME_EXECUTABLE):
-        print(f"[ERROR] {GAME_EXECUTABLE} not found.")
+    game_exe = _load_config().get("game_exe_path") or GAME_EXECUTABLE
+    if not os.path.exists(game_exe):
+        print(f"[ERROR] {game_exe} not found. Set \"game_exe_path\" in the config "
+              f"to the full path of spice64.exe, or run from the game folder.")
         input("Press Enter to exit…")
         return
+    game_dir = os.path.dirname(os.path.abspath(game_exe))
 
     title_map, diff_map = load_song_map()
+    _db = _find_music_db()
     if title_map:
         songs_with_levels = sum(
             1 for d in diff_map.values()
@@ -2247,13 +2276,16 @@ def main() -> None:
                or d.get("variant")
         )
         print(f"[INFO] Loaded {len(title_map)} songs "
-              f"({songs_with_levels} with level data).")
+              f"({songs_with_levels} with level data) from {_db}.")
         if songs_with_levels == 0:
             print("[WARN] Level data is EMPTY – the <difnum>/<rating>/<level> tag")
             print("       in your music_db.xml does not match any known format.")
             print("       Run with --dump-db to inspect the raw XML structure.")
     else:
-        print("[WARN] music_db not found – song IDs will be shown instead.")
+        print("[WARN] music_db not found – song IDs will be shown instead of "
+              "names, and no level. Set \"music_db_path\" to the full path of your")
+        print("       music_db.xml (e.g. <game>/data/others/music_db.xml or the "
+              "omnimix .merged.xml).")
 
     if _DEBUG:
         print("\033[93m[DEBUG MODE ON]\033[0m  Logging diff / gauge / RPC events to console.\n")
@@ -2274,7 +2306,7 @@ def main() -> None:
     server_proc = _start_server(server_exe) if server_exe else None
 
     # ── Launch game (with -url flag for EA service) ───────────────────────────
-    game_args = [GAME_EXECUTABLE]
+    game_args = [game_exe]
     if ea_url:
         game_args += ["-url", ea_url]   # Correct Spice2x flag (not -ea)
         print(f"[INFO] Passing EA URL to game: {ea_url}")
@@ -2315,6 +2347,7 @@ def main() -> None:
             stdin=subprocess.PIPE,  bufsize=1,
             universal_newlines=True, encoding="cp932", errors="replace",
             env=_game_env,
+            cwd=game_dir or None,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to launch {GAME_EXECUTABLE}: {exc}")

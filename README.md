@@ -1,4 +1,4 @@
-# SDVX ∇ Launcher | Discord Rich Presence
+# SDVX Discord Rich Presence
 
 A launcher for **SOUND VOLTEX** (running on **spice2x** with an **Asphyxia CORE**
 EA service) that shows a live, detailed **Discord Rich Presence**:
@@ -138,11 +138,12 @@ in `name_offsets`.
 | `heartbeat_max` | Re-assert interval in seconds; heals dropped updates (default `15`) |
 | `show_vf` | Show VolForce (`true`/`false`) |
 | `show_diff` | Show difficulty + level (`true`/`false`) |
+| `game_exe_path` | Full path to `spice64.exe` (else relative / run from the game folder); also anchors the music_db search |
+| `music_db_path` | Full path to `music_db*.xml` (else auto-located; the **largest** match wins, so the full db beats partial/omnimix dbs) |
 | `asphyxia_savedata` | Explicit path to the SDVX savedata `.db` (else auto-located) |
 | `vf_clear_coeff` | Optional override of the clear-type VolForce coefficients |
 | `launch_prefix` | **Linux only** — launch wrapper, e.g. `["wine"]` or a Proton command |
 | `wine_prefix` | **Linux only** — `WINEPREFIX` path used for the game + Asphyxia |
-| `music_db_path` | Explicit path to the `music_db*.xml` (else auto-located, incl. a recursive scan) |
 | `ryunet_cid` | NFC card id for custom Ryunet servers — VolForce is then fetched from the Ryunet API instead of local savedata |
 | `pcbid_by_url` | `{ "<custom_ea_url>": "<pcbid>" }` — PCBID per custom server (asked once, passed to spice2x via `-p`) |
 
@@ -178,8 +179,7 @@ running `--find-diff`:
 
 | Game version | `spice_diff_offset` |
 |--------------|---------------------|
-| KFC-2026012700 | `0x11DDE18` |
-| KFC-2026032402 | `0x11FFBF8` |
+| NABLA (∇) | `0x11DDE18` |
 
 (Contributions welcome — if you locate the offset for another version with
 `--find-diff`, please open an issue/PR so others can reuse it.)
@@ -197,7 +197,7 @@ running `--find-diff`:
 - **Memory read failed** — Windows: run as Administrator. Linux: ptrace is
   restricted (see *Prerequisites*).
 - **Discord not updating** — make sure the Discord desktop app is running and
-  logged in before launching. The Script also stops working if you're are selecting something in the command window.
+  logged in before launching.
 
 ---
 
@@ -228,6 +228,10 @@ owners. This is an unofficial, non-commercial fan tool.
 
 ## Future features
 
+- **Ryu7w7 / Ryunet network support** — surface network features such as
+  rivals, events and extended profile data when connected to the Ryu7w7
+  network. *(In planning — pending details on the server structure, available
+  endpoints and authentication.)*
 - **Confirmed Linux support** — full memory backend for the game under
   Wine/Proton is implemented and is currently being verified on real hardware;
   once confirmed it will be promoted from experimental to officially supported.
