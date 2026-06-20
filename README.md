@@ -1,4 +1,4 @@
-# SDVX Discord Rich Presence
+# SDVX ∇ Launcher | Discord Rich Presence
 
 A launcher for **SOUND VOLTEX** (running on **spice2x** with an **Asphyxia CORE**
 EA service) that shows a live, detailed **Discord Rich Presence**:
@@ -198,7 +198,7 @@ running `--find-diff`:
 - **Memory read failed** — Windows: run as Administrator. Linux: ptrace is
   restricted (see *Prerequisites*).
 - **Discord not updating** — make sure the Discord desktop app is running and
-  logged in before launching.
+  logged in before launching. The Script also stops working if you're are selecting something in the command window.
 
 ---
 
@@ -224,18 +224,6 @@ This project was built with reference to, and credit to, the following:
 
 All trademarks (SOUND VOLTEX, KONAMI, e-amusement) belong to their respective
 owners. This is an unofficial, non-commercial fan tool.
-
----
-
-## Future features
-
-- **Ryu7w7 / Ryunet network support** — surface network features such as
-  rivals, events and extended profile data when connected to the Ryu7w7
-  network. *(In planning — pending details on the server structure, available
-  endpoints and authentication.)*
-- **Confirmed Linux support** — full memory backend for the game under
-  Wine/Proton is implemented and is currently being verified on real hardware;
-  once confirmed it will be promoted from experimental to officially supported.
 
 ---
 
