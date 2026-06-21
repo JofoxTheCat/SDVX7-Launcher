@@ -45,7 +45,7 @@ scan, the name automatically) and then cached in the config for instant reuse.
   recommended EXE build auto-elevates via UAC; running from source means
   starting it from an elevated terminal (see *Installation & running*).
 
-### Linux (experimental — see *Future features*)
+### Linux
 - **Wine** or **Proton** to run the game (a Windows binary)
 - Asphyxia CORE — a **native Linux build is recommended**; a Windows build is
   run through Wine automatically
