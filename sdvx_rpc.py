@@ -46,7 +46,7 @@ from pypresence import Presence
 
 CLIENT_ID               = "896595145959551036"
 GAME_EXECUTABLE         = "spice64.exe"
-__version__             = "1.1.1"                       # bump per release/tag
+__version__             = "1.1.2"                       # bump per release/tag
 GITHUB_REPO             = "JofoxTheCat/SDVX7-Launcher"
 IMG_MENU                = "sdvx_nabla"
 CONFIG_FILE             = "sdvx_rpc_config.json"
@@ -65,7 +65,7 @@ _SPICE_DIFF_BY_INDEX = {0: "NOV", 1: "ADV", 2: "EXH", 4: "MXM", 5: "ULT"}
 _DIFF_BY_INDEX = _SPICE_DIFF_BY_INDEX
 _VARIANT_NAMES = {
     "infinite": "INF", "gravity": "GRV",
-    "heaven":   "HVN", "vivid":   "VVD", "exceed": "XCD",
+    "heaven":   "HVN", "vivid":   "VVD", "exceed": "XCD", "nabla": "NBL",
 }
 
 # Regexes for "suspicious" log lines in debug mode.
@@ -949,7 +949,7 @@ def load_song_map() -> tuple[dict, dict]:
     rx_title  = re.compile(r'<title_name>(.*?)</title_name>')
     rx_diff_b = re.compile(
         r'<(novice|advanced|exhaust|'
-        r'infinite|gravity|heaven|vivid|exceed|'
+        r'infinite|gravity|heaven|vivid|exceed|nabla|'
         r'maximum|ultimate)>(.*?)</\1>',
         re.DOTALL
     )
@@ -978,6 +978,10 @@ def load_song_map() -> tuple[dict, dict]:
         **{k: v for k, v in _VARIANT_NAMES.items()},
     }
     _FIXED = {"NOV", "ADV", "EXH", "MXM", "ULT"}
+    # The 4th-slot chart is stored as <infinite> regardless of its real variant;
+    # the actual type comes from <inf_ver> (2=INF 3=GRV 4=HVN 5=VVD 6=XCD).
+    _INF_VER = {2: "INF", 3: "GRV", 4: "HVN", 5: "VVD", 6: "XCD", 7: "NBL"}
+    rx_infver = re.compile(r'<inf_ver[^>]*>\s*(\d+)\s*</inf_ver>', re.IGNORECASE)
 
     for mb in rx_block.finditer(content):
         try:
@@ -988,6 +992,8 @@ def load_song_map() -> tuple[dict, dict]:
         t = rx_title.search(body)
         if t:
             title_map[sid] = t.group(1).strip()
+        ivm = rx_infver.search(body)
+        iv_name = _INF_VER.get(int(ivm.group(1))) if ivm else None
         diffs: dict = {}
         variant_info: tuple | None = None
         for md in rx_diff_b.finditer(body):
@@ -1000,7 +1006,8 @@ def load_song_map() -> tuple[dict, dict]:
             if short in _FIXED:
                 diffs[short] = lvl
             elif tag in _VARIANT_NAMES:
-                variant_info = (_VARIANT_NAMES[tag], lvl)
+                # prefer the real variant from inf_ver; fall back to the tag name
+                variant_info = (iv_name or _VARIANT_NAMES[tag], lvl)
         diffs["variant"] = variant_info
         diff_map[sid] = diffs
 
@@ -1063,14 +1070,14 @@ _RX_CHART_FILE = re.compile(
 )
 _RX_DIFF_KW = re.compile(
     r'\b(NOV(?:ICE)?|ADV(?:ANCED)?|EXH(?:AUST)?|'
-    r'INF(?:INITE)?|GRV|HVN|VVD|XCD|MXM|ULT(?:IMATE)?)\b',
+    r'INF(?:INITE)?|GRV|HVN|VVD|XCD|NBL|NABLA|MXM|ULT(?:IMATE)?)\b',
     re.IGNORECASE
 )
 _DIFF_KW_MAP = {
     "NOVICE": "NOV", "NOV": "NOV", "ADVANCED": "ADV", "ADV": "ADV",
     "EXHAUST": "EXH", "EXH": "EXH", "INFINITE": "INF", "INF": "INF",
     "GRV": "GRV", "HVN": "HVN", "VVD": "VVD", "XCD": "XCD", "MXM": "MXM",
-    "ULTIMATE": "ULT", "ULT": "ULT",
+    "NBL": "NBL", "NABLA": "NBL", "ULTIMATE": "ULT", "ULT": "ULT",
 }
 
 
@@ -1533,7 +1540,7 @@ def _spice_dump_mode() -> None:
 
 _FIND_DIFF_INDEX = {
     "NOV": 0, "ADV": 1, "EXH": 2,
-    "INF": 3, "GRV": 3, "HVN": 3, "VVD": 3, "XCD": 3,   # all variants = index 3
+    "INF": 3, "GRV": 3, "HVN": 3, "VVD": 3, "XCD": 3, "NBL": 3,  # variants = index 3
     "MXM": 4, "ULT": 5,
 }
 
